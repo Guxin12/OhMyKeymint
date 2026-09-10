@@ -36,7 +36,12 @@ pub(crate) fn strongbox_keymint_present() -> bool {
 
 pub(crate) fn resolve_hardware_profile(security_level: SecurityLevel) -> KeyMintHardwareProfile {
     let version_number = probe_keymint_version_from_vintf(security_level)
-        .unwrap_or_else(fallback_keymint_version_from_android);
+        .or_else(|| {
+            probe_system_keymint_hardware_info(security_level)
+                .ok()
+                .and_then(|info| normalize_keymint_version(info.versionNumber))
+        })
+        .unwrap_or(KEYMINT_V1);
 
     if let Some(profile) = resolve_property_profile_with(
         security_level,
@@ -265,17 +270,6 @@ fn keymint_instance_declared_in_vintf(security_level: SecurityLevel) -> bool {
             log::warn!("failed to resolve KeyMint instance from VINTF: {error:#}");
             false
         }
-    }
-}
-
-fn fallback_keymint_version_from_android() -> i32 {
-    match kmr_common::android_version::android_major_version() {
-        Some(version) if version >= 17 => KEYMINT_V5,
-        Some(16) => KEYMINT_V4,
-        Some(14 | 15) => KEYMINT_V3,
-        Some(13) => KEYMINT_V2,
-        Some(12) => KEYMINT_V1,
-        _ => KEYMINT_V4,
     }
 }
 
