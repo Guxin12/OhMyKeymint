@@ -62,103 +62,62 @@ pub(crate) fn strongbox_keymint_present() -> bool {
     // }
 // }
 
-pub(crate) fn resolve_hardware_profile(
-    security_level: SecurityLevel,
-) -> KeyMintHardwareProfile {
-    /*
-     * KeyMint version 探测优先级：
-     *
-     * 1. VINTF
-     * 2. System KeyMint getHardwareInfo()
-     * 3. KEYMINT_V1 兜底
-     *
-     * 注意：
-     * VINTF 的结果优先于 System KeyMint。
-     * System KeyMint 的 versionNumber 不应该在 VINTF
-     * 已经成功解析后覆盖 VINTF 的结果。
-     */
-
-    let version_number = match probe_keymint_version_from_vintf(security_level) {
-        Some(version) => {
-            log::info!(
-                "KeyMint version probe: VINTF probe succeeded, \
-                 using VINTF version={}",
+pub(crate) fn resolve_hardware_profile( security_level: SecurityLevel, ) -> KeyMintHardwareProfile {
+	let version_number = match probe_keymint_version_from_vintf(security_level) {
+		Some(version) => {
+			log:: info!( "KeyMint version probe: VINTF probe succeeded, using VINTF version = {}",
                 version
             );
-
             version
         }
-
         None => {
             log::warn!(
-                "KeyMint version probe: VINTF probe failed, \
-                 trying system KeyMint getHardwareInfo()"
+                "KeyMint version probe: VINTF probe failed, trying system KeyMint getHardwareInfo()"
             );
-
             match probe_system_keymint_hardware_info(security_level) {
                 Ok(info) => {
                     log::info!(
-                        "KeyMint version probe: system KeyMint \
-                         getHardwareInfo() succeeded"
+                        "KeyMint version probe: system KeyMint getHardwareInfo() succeeded"
                     );
-
                     log::info!(
-                        "KeyMint version probe: system \
-                         versionNumber={}",
+                        "KeyMint version probe: system versionNumber = {}",
                         info.versionNumber
                     );
-
                     log::info!(
-                        "KeyMint version probe: system \
-                         keyMintName={:?}",
+                        "KeyMint version probe: system keyMintName = {: ?}",
                         info.keyMintName
                     );
-
                     log::info!(
-                        "KeyMint version probe: system \
-                         keyMintAuthorName={:?}",
+                        "KeyMint version probe: system keyMintAuthorName = {: ?}",
                         info.keyMintAuthorName
                     );
-
                     match normalize_keymint_version(info.versionNumber) {
                         Some(version) => {
                             log::info!(
-                                "KeyMint version probe: using system \
-                                 KeyMint versionNumber={}",
+                                "KeyMint version probe: using system KeyMint versionNumber = {}",
                                 version
                             );
-
                             version
                         }
-
                         None => {
                             log::warn!(
-                                "KeyMint version probe: system KeyMint \
-                                 returned invalid versionNumber={}, \
-                                 falling back to KEYMINT_V1={}",
+                                "KeyMint version probe: system KeyMint returned invalid versionNumber = {}, falling back to KEYMINT_V1 = {}",
                                 info.versionNumber,
                                 KEYMINT_V1
                             );
-
                             KEYMINT_V1
                         }
                     }
                 }
-
                 Err(error) => {
                     log::warn!(
-                        "KeyMint version probe: system KeyMint \
-                         getHardwareInfo() failed: {:#}",
+                        "KeyMint version probe: system KeyMint getHardwareInfo() failed: {: #}",
                         error
                     );
-
                     log::warn!(
-                        "KeyMint version probe: VINTF and system \
-                         KeyMint probes both failed, \
-                         falling back to KEYMINT_V1={}",
+                        "KeyMint version probe: VINTF and system KeyMint probes both failed, falling back to KEYMINT_V1 = {}",
                         KEYMINT_V1
                     );
-
                     KEYMINT_V1
                 }
             }
@@ -166,7 +125,7 @@ pub(crate) fn resolve_hardware_profile(
     };
 
     log::info!(
-        "KeyMint version probe: final version_number={}",
+        "KeyMint version probe: final version_number = {}",
         version_number
     );
 
@@ -191,15 +150,10 @@ pub(crate) fn resolve_hardware_profile(
 
         Err(error) => {
             log::warn!(
-                "failed to resolve dynamic KeyMint hardware profile: {error:#}"
-            );
-
-            fallback_profile(
-                security_level,
-                version_number,
-            )
-        }
-    }
+                "failed to resolve dynamic KeyMint hardware profile: {error: #}" );
+			fallback_profile( security_level, version_number, )
+		}
+	}
 }
 
 fn detect_strongbox_keymint_present() -> bool {
