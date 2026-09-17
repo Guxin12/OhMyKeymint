@@ -55,8 +55,11 @@ pub struct CertSignAlgoInfo {
 
 #[derive(Clone)]
 pub struct KeyBox {
-    rsa_info: CertSignAlgoInfo,
-    ec_info: CertSignAlgoInfo,
+    /// Present when the keybox contains an RSA attestation key.
+    /// RKP / some OEM boxes may omit RSA and only ship ECDSA.
+    rsa_info: Option<CertSignAlgoInfo>,
+    /// Present when the keybox contains an ECDSA attestation key.
+    ec_info: Option<CertSignAlgoInfo>,
     identity_digest: [u8; 32],
 }
 
@@ -100,12 +103,14 @@ impl KeyBox {
             }
         }
 
-        let rsa_entry = rsa_entry.context("missing RSA key entry in keybox.xml")?;
-        let ec_entry = ec_entry.context("missing EC key entry in keybox.xml")?;
+        // Accept EC-only, RSA-only, or both (RKP often ships ECDSA only).
+        if rsa_entry.is_none() && ec_entry.is_none() {
+            bail!("keybox.xml contains no usable EC or RSA key entry");
+        }
 
-        let rsa_info = Self::build_rsa_info(rsa_entry)?;
-        let ec_info = Self::build_ec_info(ec_entry)?;
-        let identity_digest = Self::compute_identity_digest(&rsa_info, &ec_info)?;
+        let rsa_info = rsa_entry.map(Self::build_rsa_info).transpose()?;
+        let ec_info = ec_entry.map(Self::build_ec_info).transpose()?;
+        let identity_digest = Self::compute_identity_digest(rsa_info.as_ref(), ec_info.as_ref())?;
 
         Ok(Self {
             rsa_info,
@@ -158,14 +163,18 @@ impl KeyBox {
     }
 
     fn compute_identity_digest(
-        rsa_info: &CertSignAlgoInfo,
-        ec_info: &CertSignAlgoInfo,
+        rsa_info: Option<&CertSignAlgoInfo>,
+        ec_info: Option<&CertSignAlgoInfo>,
     ) -> Result<[u8; 32]> {
         let mut material = Vec::new();
-        append_labeled_bytes(&mut material, b"rsa-key", &rsa_info.key_der);
-        append_labeled_chain(&mut material, b"rsa-chain", &rsa_info.chain);
-        append_labeled_bytes(&mut material, b"ec-key", &ec_info.key_der);
-        append_labeled_chain(&mut material, b"ec-chain", &ec_info.chain);
+        if let Some(rsa) = rsa_info {
+            append_labeled_bytes(&mut material, b"rsa-key", &rsa.key_der);
+            append_labeled_chain(&mut material, b"rsa-chain", &rsa.chain);
+        }
+        if let Some(ec) = ec_info {
+            append_labeled_bytes(&mut material, b"ec-key", &ec.key_der);
+            append_labeled_chain(&mut material, b"ec-chain", &ec.chain);
+        }
 
         BoringSha256 {}
             .hash(&material)
@@ -173,7 +182,8 @@ impl KeyBox {
     }
 
     fn refresh_identity_digest(&mut self) -> Result<()> {
-        self.identity_digest = Self::compute_identity_digest(&self.rsa_info, &self.ec_info)?;
+        self.identity_digest =
+            Self::compute_identity_digest(self.rsa_info.as_ref(), self.ec_info.as_ref())?;
         Ok(())
     }
 
@@ -182,14 +192,20 @@ impl KeyBox {
     }
 
     fn signing_info(&self, key_type: SigningKeyType) -> Result<SigningInfoSnapshot, Error> {
-        let (signing_key, cert_chain) = match key_type.algo_hint {
-            SigningAlgorithm::Rsa => (&self.rsa_info.key, &self.rsa_info.chain),
-            SigningAlgorithm::Ec => (&self.ec_info.key, &self.ec_info.chain),
-        };
+        let info = match key_type.algo_hint {
+            SigningAlgorithm::Rsa => self.rsa_info.as_ref(),
+            SigningAlgorithm::Ec => self.ec_info.as_ref(),
+        }
+        .ok_or_else(|| {
+            kmr_common::km_err!(
+                UnsupportedPurpose,
+                "keybox does not contain the requested algorithm"
+            )
+        })?;
 
         Ok(SigningInfoSnapshot {
-            signing_key: signing_key.clone(),
-            cert_chain: cert_chain.clone(),
+            signing_key: info.key.clone(),
+            cert_chain: info.chain.clone(),
             identity_digest: self.identity_digest,
         })
     }
@@ -224,33 +240,51 @@ impl KeyBox {
                 .collect(),
         };
         match algorithm {
-            KeyAlgorithm::Ec => self.ec_info = Self::build_ec_info(entry)?,
-            KeyAlgorithm::Rsa => self.rsa_info = Self::build_rsa_info(entry)?,
+            KeyAlgorithm::Ec => self.ec_info = Some(Self::build_ec_info(entry)?),
+            KeyAlgorithm::Rsa => self.rsa_info = Some(Self::build_rsa_info(entry)?),
         }
         self.refresh_identity_digest()
     }
 
     pub fn to_xml_string(&self) -> String {
+        let mut blocks = Vec::new();
+        if self.ec_info.is_some() {
+            blocks.push(self.to_xml_block(KeyAlgorithm::Ec));
+        }
+        if self.rsa_info.is_some() {
+            blocks.push(self.to_xml_block(KeyAlgorithm::Rsa));
+        }
+        let keys = blocks.join("\n");
         format!(
             concat!(
                 "<?xml version=\"1.0\"?>\n",
                 "<AndroidAttestation>\n",
-                "<NumberOfKeyboxes>2</NumberOfKeyboxes>\n",
+                "<NumberOfKeyboxes>1</NumberOfKeyboxes>\n",
                 "<Keybox DeviceID=\"sw\">\n",
-                "{}\n",
-                "{}\n",
+                "{keys}\n",
                 "</Keybox>\n",
                 "</AndroidAttestation>\n"
             ),
-            self.to_xml_block(KeyAlgorithm::Ec),
-            self.to_xml_block(KeyAlgorithm::Rsa),
+            keys = keys,
         )
     }
 
     fn to_xml_block(&self, algorithm: KeyAlgorithm) -> String {
         let (name, private_label, info) = match algorithm {
-            KeyAlgorithm::Ec => ("ecdsa", "EC PRIVATE KEY", &self.ec_info),
-            KeyAlgorithm::Rsa => ("rsa", "RSA PRIVATE KEY", &self.rsa_info),
+            KeyAlgorithm::Ec => (
+                "ecdsa",
+                "EC PRIVATE KEY",
+                self.ec_info
+                    .as_ref()
+                    .expect("to_xml_block(Ec) without ec_info"),
+            ),
+            KeyAlgorithm::Rsa => (
+                "rsa",
+                "RSA PRIVATE KEY",
+                self.rsa_info
+                    .as_ref()
+                    .expect("to_xml_block(Rsa) without rsa_info"),
+            ),
         };
         let certificates = info
             .chain
@@ -575,20 +609,32 @@ fn is_fallback_continuation_with_state(
         && current_identity == keybox.identity_digest()
 }
 
+/// Load keybox from disk.
+///
+/// Policy:
+/// - If the user file exists, parse **exactly** what the user uploaded.
+///   Never rewrite a present user file to the bundled template on error.
+/// - EC-only / RSA-only / dual keyboxes are all accepted.
+/// - Fallback to bundled template only when the file is missing (first boot).
+/// - A successfully parsed user keybox is never treated as fallback, so DB
+///   retirement of stale keybox-bound entries is always allowed.
 fn load_keybox_with_fallback(path: &str) -> Result<(KeyBox, bool)> {
     match fs::read_to_string(path) {
         Ok(contents) => match KeyBox::from_xml_str(&contents) {
             Ok(keybox) => {
-                let fallback_origin = is_fallback_continuation(&keybox, &contents);
-                Ok((keybox, fallback_origin))
+                // User file present and parsed successfully: never fallback.
+                let _ = is_fallback_continuation(&keybox, &contents);
+                Ok((keybox, false))
             }
             Err(error) => {
+                // Keep the user's file intact; do not overwrite with bundled.
                 warn!(
-                    "invalid keybox.xml at {}: {:#}; rewriting bundled template",
+                    "invalid keybox.xml at {}: {:#}; keeping user file, not falling back",
                     path, error
                 );
-                write_bundled_keybox(path)?;
-                Ok((KeyBox::new(), true))
+                Err(error).with_context(|| {
+                    format!("failed to parse user keybox.xml at {path} (no fallback)")
+                })
             }
         },
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -668,10 +714,19 @@ pub fn current_identity_digest() -> [u8; 32] {
 pub(crate) fn signing_certificate_ders_from_disk() -> Result<[Vec<u8>; 2]> {
     let _io_guard = KEYBOX_IO_LOCK.lock().unwrap();
     let (keybox, _) = load_keybox_with_fallback(KEYBOX_PATH)?;
-    Ok([
-        keybox.rsa_info.chain[0].encoded_certificate.clone(),
-        keybox.ec_info.chain[0].encoded_certificate.clone(),
-    ])
+    let rsa_leaf = keybox
+        .rsa_info
+        .as_ref()
+        .and_then(|info| info.chain.first())
+        .map(|c| c.encoded_certificate.clone())
+        .unwrap_or_default();
+    let ec_leaf = keybox
+        .ec_info
+        .as_ref()
+        .and_then(|info| info.chain.first())
+        .map(|c| c.encoded_certificate.clone())
+        .unwrap_or_default();
+    Ok([rsa_leaf, ec_leaf])
 }
 
 pub struct KeyboxManager;
@@ -700,8 +755,8 @@ mod tests {
     #[test]
     fn parses_bundled_template() {
         let keybox = KeyBox::from_xml_str(BUNDLED_KEYBOX_XML).unwrap();
-        assert_eq!(keybox.ec_info.chain.len(), 2);
-        assert_eq!(keybox.rsa_info.chain.len(), 2);
+        assert_eq!(keybox.ec_info.as_ref().unwrap().chain.len(), 2);
+        assert_eq!(keybox.rsa_info.as_ref().unwrap().chain.len(), 2);
         assert_ne!(keybox.identity_digest(), [0u8; 32]);
     }
 
@@ -711,10 +766,24 @@ mod tests {
     }
 
     #[test]
+    fn accepts_ec_only_keybox() {
+        let dual = KeyBox::from_xml_str(BUNDLED_KEYBOX_XML).unwrap();
+        let mut ec_only = dual.clone();
+        ec_only.rsa_info = None;
+        ec_only.refresh_identity_digest().unwrap();
+        let parsed = KeyBox::from_xml_str(&ec_only.to_xml_string()).unwrap();
+        assert!(parsed.ec_info.is_some());
+        assert!(parsed.rsa_info.is_none());
+    }
+
+    #[test]
     fn identity_changes_when_chain_changes() {
         let original = KeyBox::from_xml_str(BUNDLED_KEYBOX_XML).unwrap();
         let mut changed = original.clone();
-        changed.ec_info.chain.push(changed.ec_info.chain[0].clone());
+        {
+            let ec = changed.ec_info.as_mut().unwrap();
+            ec.chain.push(ec.chain[0].clone());
+        }
         changed.refresh_identity_digest().unwrap();
 
         let modified = KeyBox::from_xml_str(&changed.to_xml_string()).unwrap();
@@ -724,9 +793,14 @@ mod tests {
     #[test]
     fn rejects_mismatched_private_key_and_certificate_chain() {
         let keybox = KeyBox::from_xml_str(BUNDLED_KEYBOX_XML).unwrap();
-        let rsa_cert =
-            encode_pem_block("CERTIFICATE", &keybox.rsa_info.chain[0].encoded_certificate);
-        let ec_cert = encode_pem_block("CERTIFICATE", &keybox.ec_info.chain[0].encoded_certificate);
+        let rsa_cert = encode_pem_block(
+            "CERTIFICATE",
+            &keybox.rsa_info.as_ref().unwrap().chain[0].encoded_certificate,
+        );
+        let ec_cert = encode_pem_block(
+            "CERTIFICATE",
+            &keybox.ec_info.as_ref().unwrap().chain[0].encoded_certificate,
+        );
         let modified_xml = BUNDLED_KEYBOX_XML.replacen(&rsa_cert, &ec_cert, 1);
         assert!(KeyBox::from_xml_str(&modified_xml).is_err());
     }
@@ -765,13 +839,14 @@ mod tests {
     }
 
     #[test]
-    fn invalid_file_falls_back_to_bundled_template() {
+    fn invalid_user_file_is_not_overwritten() {
         let path = write_temp_keybox("invalid", "<not-xml>");
-        let (keybox, used_fallback) = load_keybox_with_fallback(path.to_str().unwrap()).unwrap();
-        assert!(used_fallback);
-        assert_eq!(keybox.identity_digest(), KeyBox::new().identity_digest());
-        let written = fs::read_to_string(path).unwrap();
-        assert!(written.contains("<AndroidAttestation>"));
+        let original = fs::read_to_string(&path).unwrap();
+        let result = load_keybox_with_fallback(path.to_str().unwrap());
+        assert!(result.is_err());
+        // User file must remain untouched — no rewrite to bundled template.
+        let after = fs::read_to_string(&path).unwrap();
+        assert_eq!(original, after);
     }
 
     #[test]
