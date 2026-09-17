@@ -41,6 +41,9 @@ jobs:
     - name: Install Android SDK
       if: steps.boringssl-cache.outputs.cache-hit != 'true'
       uses: android-actions/setup-android@v4
+      with:
+        packages: 'platform-tools'
+
     - name: Install Android NDK and bindgen
       if: steps.boringssl-cache.outputs.cache-hit != 'true'
       run: |
@@ -59,7 +62,7 @@ jobs:
       if: steps.boringssl-cache.outputs.cache-hit != 'true'
       run: |
         cd boringssl
-        export PATH="~/.cargo/bin:$PATH"
+        export PATH="$HOME/.cargo/bin:$PATH"
         $ANDROID_SDK_ROOT/cmake/4.1.2/bin/cmake -GNinja -B build \
           -DRUST_BINDINGS=aarch64-linux-android \
           -DCMAKE_SYSROOT=$ANDROID_SDK_ROOT/ndk/29.0.14206865/toolchains/llvm/prebuilt/linux-x86_64/sysroot/ \
@@ -115,6 +118,9 @@ jobs:
 
     - name: Install Android SDK
       uses: android-actions/setup-android@v4
+      with:
+        packages: 'platform-tools'
+
     - name: Install Android NDK
       run: |
         echo "y" | sdkmanager --install "ndk;29.0.14206865" --sdk_root=${ANDROID_SDK_ROOT} &> /dev/null
