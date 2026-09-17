@@ -192,16 +192,25 @@ impl KeyBox {
     }
 
     fn signing_info(&self, key_type: SigningKeyType) -> Result<SigningInfoSnapshot, Error> {
-        let info = match key_type.algo_hint {
-            SigningAlgorithm::Rsa => self.rsa_info.as_ref(),
-            SigningAlgorithm::Ec => self.ec_info.as_ref(),
-        }
-        .ok_or_else(|| {
+        // Prefer the algorithm matching the key being attested, but RKP keyboxes
+        // frequently only provision ECDSA batch keys. Fall back to the other
+        // available algorithm so RSA key generation with attestation still works.
+        let (preferred, fallback) = match key_type.algo_hint {
+            SigningAlgorithm::Rsa => (self.rsa_info.as_ref(), self.ec_info.as_ref()),
+            SigningAlgorithm::Ec => (self.ec_info.as_ref(), self.rsa_info.as_ref()),
+        };
+        let info = preferred.or(fallback).ok_or_else(|| {
             kmr_common::km_err!(
                 UnsupportedPurpose,
-                "keybox does not contain the requested algorithm"
+                "keybox does not contain any usable attestation algorithm"
             )
         })?;
+        if preferred.is_none() {
+            log::info!(
+                "keybox missing preferred {:?} attestation key; using available algorithm",
+                key_type.algo_hint
+            );
+        }
 
         Ok(SigningInfoSnapshot {
             signing_key: info.key.clone(),
